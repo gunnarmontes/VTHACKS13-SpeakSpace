@@ -67,6 +67,7 @@ class PropertySearch(APIView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def get(self, request):
         # Validate query params with a serializer
@@ -146,6 +147,7 @@ class PlacePhoto(APIView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def get(self, request):
         key = _server_places_key()
@@ -260,7 +262,8 @@ class PropertyDetail(APIView):
     """
 
     permission_classes = [AllowAny]
-
+    authentication_classes = []
+    
     def get(self, request, place_id: str):
         try:
             # Base fields only — no reviewSummary
