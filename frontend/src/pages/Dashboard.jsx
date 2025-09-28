@@ -47,7 +47,7 @@ export default function Dashboard() {
   // Axios cancellation per runSearch to avoid race-y state updates
   const currentAbortRef = useRef(null);
 
-  // For building absolute URLs when needed (e.g., photos) – safe base
+  // API base (absolute origin to deployed backend, no trailing slash)
   const API_BASE = useMemo(() => {
     const raw = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
     return raw.replace(/\/+$/, "");
@@ -277,6 +277,7 @@ export default function Dashboard() {
             style={{ flex: 1, padding: 8 }}
             aria-label="Search city or zip"
           />
+        {/* NOTE: HTML forms submit on Enter automatically; the onKeyDown above is just a helper */}
           <button type="submit" disabled={loading} aria-busy={loading}>
             {loading ? "Searching…" : "Search"}
           </button>
@@ -355,13 +356,14 @@ export default function Dashboard() {
                   <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{p.address}</div>
                 )}
 
-                {/* If your backend gives a Places v1 name, prefer requesting through your photo proxy.
-                   Otherwise keep p.image_url as-is. */}
+                {/* Prefer the backend photo proxy when we have a Places v1 photo name */}
                 {p.photoName ? (
                   <img
-                    src={`${API_BASE}/api/places/photo/?name=${encodeURIComponent(
-                      p.photoName
-                    )}&maxwidth=640&maxheight=400`}
+                    src={`${API_BASE}/api/places/photo/?${new URLSearchParams({
+                      name: p.photoName,
+                      maxwidth: "640",
+                      maxheight: "400",
+                    }).toString()}`}
                     alt={p.name || "Apartment photo"}
                     style={{
                       width: "100%",

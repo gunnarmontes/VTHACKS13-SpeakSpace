@@ -61,3 +61,4 @@ class PlaceSerializer(serializers.Serializer):
 
     url = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     image_url = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    photoName = serializers.CharField(allow_blank=True, allow_null=True, required=False)

@@ -119,6 +119,7 @@ def normalize_place(p: Dict[str, Any]) -> Dict[str, Any]:
         "user_ratings_total": p.get("userRatingCount"),
         "url": p.get("googleMapsUri"),
         # Generate a backend-proxied photo URL (no key in browser)
+        "photoName": photo_name,
         "image_url": _photo_media_url(photo_name) if photo_name else None,
     }
 

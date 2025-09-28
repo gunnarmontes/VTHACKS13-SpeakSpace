@@ -10,6 +10,7 @@ import traceback
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 class RegisterView(APIView):
+    authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
