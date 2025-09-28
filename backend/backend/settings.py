@@ -7,50 +7,70 @@ import os
 from dotenv import load_dotenv
 from datetime import timedelta
 
-# Load .env file
-load_dotenv()
-
-# External service keys (read from .env)
-GOOGLE_PLACES_KEY = os.getenv("GOOGLE_PLACES_KEY", "")
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+# ----------------------------------------------------------------------
+# Load environment
+# ----------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv()  # loads .env (local) if present
 
 # ----------------------------------------------------------------------
-# Security
+# Core
 # ----------------------------------------------------------------------
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-development-placeholder")
-
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
+# Hosts / CORS
+RENDER_HOST = "vthacks13-speakspace.onrender.com"
+VERCEL_HOST = "vthacks13-speakspace.vercel.app"
+
 if DEBUG:
-    # Development: less restrictive
-    ALLOWED_HOSTS = ["*"]
+    ALLOWED_HOSTS = ["*", "localhost", "127.0.0.1"]
     CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+    ]
     CSRF_TRUSTED_ORIGINS = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:8000",
     ]
 else:
-    # Production: explicit Render + Vercel URLs
-    ALLOWED_HOSTS = [
-        "vthacks13-speakspace.onrender.com",
-        "vthacks13-speakspace.vercel.app",
-    ]
-
-    CSRF_TRUSTED_ORIGINS = [
-        "https://vthacks13-speakspace.onrender.com",
-        "https://vthacks13-speakspace.vercel.app",
-    ]
-
-    # Allow frontend → backend API calls
+    # Production: be explicit. We still allow local Vite to call the prod API.
+    ALLOWED_HOSTS = [RENDER_HOST, VERCEL_HOST, "localhost", "127.0.0.1"]
+    CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = [
-        "https://vthacks13-speakspace.vercel.app",
+        "http://localhost:5173",                        # local Vite → prod API
+        f"https://{RENDER_HOST}",                      # (same-origin ok, but harmless)
+        f"https://{VERCEL_HOST}",                      # if you ever host FE on Vercel
     ]
+    CSRF_TRUSTED_ORIGINS = [
+        f"https://{RENDER_HOST}",
+        f"https://{VERCEL_HOST}",
+    ]
+
+# Behind a proxy (Render/Heroku style)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# If you use cookies anywhere (not required for your JWT flows, but safe defaults)
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
 
 # ----------------------------------------------------------------------
-# Application definition
+# External service keys (read from env)
+# (Access these directly via os.environ in your app modules.)
+# ----------------------------------------------------------------------
+# Support either env var name for Google:
+os.environ.setdefault(
+    "GOOGLE_MAPS_API_KEY",
+    os.getenv("GOOGLE_MAPS_API_KEY") or os.getenv("GOOGLE_PLACES_KEY", "")
+)
+
+# ----------------------------------------------------------------------
+# Apps
 # ----------------------------------------------------------------------
 INSTALLED_APPS = [
     "corsheaders",
@@ -60,15 +80,23 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+
+    # third-party
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "channels",
+
+    # your apps
     "authapp",
     "mapapp",
-    "channels",          # ← add this
-    "voiceagent", 
+    "voiceagent",   # if you still use it
+    # if you created these (recommended for tools / voice endpoints):
+    "agenttools",
+    "agentvoice",
 ]
-ASGI_APPLICATION = "backend.asgi.application"
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # keep CORS first
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -78,19 +106,23 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+# ----------------------------------------------------------------------
+# ASGI / Channels
+# ----------------------------------------------------------------------
+ASGI_APPLICATION = "backend.asgi.application"
 CHANNEL_LAYERS = {
     "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}
 }
 
 # ----------------------------------------------------------------------
-# Django REST Framework / JWT
+# DRF / JWT
 # ----------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",  # tighten per-view if needed
+        "rest_framework.permissions.AllowAny",  # tighten per-view where needed
     ],
 }
 
@@ -101,7 +133,7 @@ SIMPLE_JWT = {
 }
 
 # ----------------------------------------------------------------------
-# Templates / URLs / WSGI
+# URLs / Templates / WSGI
 # ----------------------------------------------------------------------
 ROOT_URLCONF = "backend.urls"
 
@@ -124,7 +156,7 @@ TEMPLATES = [
 WSGI_APPLICATION = "backend.wsgi.application"
 
 # ----------------------------------------------------------------------
-# Database (SQLite by default — replace with Postgres for production)
+# Database (SQLite for dev; consider Postgres in prod)
 # ----------------------------------------------------------------------
 DATABASES = {
     "default": {
@@ -144,7 +176,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ----------------------------------------------------------------------
-# Internationalization
+# I18N
 # ----------------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
@@ -155,5 +187,6 @@ USE_TZ = True
 # Static files
 # ----------------------------------------------------------------------
 STATIC_URL = "static/"
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
