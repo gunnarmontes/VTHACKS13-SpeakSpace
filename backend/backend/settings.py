@@ -92,7 +92,7 @@ INSTALLED_APPS = [
     "voiceagent",   # if you still use it
     # if you created these (recommended for tools / voice endpoints):
     "agenttools",
-    "agentvoice",
+
 ]
 
 MIDDLEWARE = [
