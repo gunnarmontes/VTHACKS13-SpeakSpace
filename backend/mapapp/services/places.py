@@ -6,10 +6,8 @@ import httpx
 API_ROOT = "https://places.googleapis.com/v1"
 TIMEOUT = 20.0
 
-
 class PlacesError(Exception):
     pass
-
 
 def _server_key() -> str:
     key = os.getenv("GOOGLE_PLACES_KEY") or os.getenv("GOOGLE_MAPS_API_KEY") or ""
@@ -17,24 +15,13 @@ def _server_key() -> str:
         raise PlacesError("Missing GOOGLE_PLACES_KEY or GOOGLE_MAPS_API_KEY.")
     return key
 
-
 def _client() -> httpx.Client:
     return httpx.Client(timeout=TIMEOUT, follow_redirects=True)
-
 
 def _auth_headers() -> dict:
     return {"X-Goog-Api-Key": _server_key()}
 
-
-# ------------------------- Search helpers -------------------------
-
-ALLOWED_APARTMENT_TYPES = [
-    "apartment_complex",
-    "property_management_company",
-    "real_estate_agency",
-]
-
-# Field mask for search (list responses: 'places.*')
+# ------------------------- Field masks -------------------------
 SEARCH_FIELD_MASK = ",".join([
     "places.id",
     "places.displayName",
@@ -49,70 +36,92 @@ SEARCH_FIELD_MASK = ",".join([
     "places.userRatingCount",
 ])
 
+GEOCODE_FIELD_MASK = ",".join([
+    "places.id",
+    "places.displayName",
+    "places.location",
+    "places.primaryType",
+    "places.types",
+])
+
+DETAILS_FIELD_MASK_BASE = ",".join([
+    "id","displayName","formattedAddress","location",
+    "googleMapsUri","websiteUri","rating","userRatingCount","photos",
+])
+
+# ------------------------- Helpers -------------------------
+
+ALLOWED_APARTMENT_TYPES = [
+    "apartment_complex",
+    "property_management_company",
+    "real_estate_agency",
+    # sometimes google returns these:
+    "apartment", "apartment_building", "apartment_rental_agency", "condominium_complex",
+]
+
+LOCALITY_TYPES = {
+    "locality", "postal_code", "administrative_area_level_3",
+    "administrative_area_level_2", "administrative_area_level_1",
+}
 
 def text_search_apartments(*, text_query: str, page_size: int = 15) -> list[dict]:
-    """
-    POST places:searchText. NOTE: uses `includedType` (singular) when filtering.
-    """
     headers = {**_auth_headers(), "X-Goog-FieldMask": SEARCH_FIELD_MASK}
     body = {
         "textQuery": text_query,
         "pageSize": max(1, min(int(page_size or 15), 20)),
         "includedType": "apartment_complex",  # singular for searchText
     }
-
     with _client() as c:
         r = c.post(f"{API_ROOT}/places:searchText", headers=headers, json=body)
-
-        # Fallback if filter not accepted by this project/region
         if r.status_code == 400:
-            try:
-                msg = r.json().get("error", {}).get("message", "")
-            except Exception:
-                msg = r.text
-            if "Invalid JSON payload" in msg or "Unknown name" in msg or "INVALID_ARGUMENT" in msg:
-                body.pop("includedType", None)
-                r = c.post(f"{API_ROOT}/places:searchText", headers=headers, json=body)
-
+            # Retry without filter if project/region rejects includedType on text search
+            body.pop("includedType", None)
+            r = c.post(f"{API_ROOT}/places:searchText", headers=headers, json=body)
     if r.status_code != 200:
         raise PlacesError(f"searchText failed {r.status_code}: {r.text[:300]}")
     return r.json().get("places") or []
 
+def geocode_center(text_query: str) -> tuple[float,float] | None:
+    """
+    Use searchText to resolve a city/zip to a center lat/lng (1 result).
+    """
+    headers = {**_auth_headers(), "X-Goog-FieldMask": GEOCODE_FIELD_MASK}
+    body = {"textQuery": text_query, "pageSize": 1}
+    with _client() as c:
+        r = c.post(f"{API_ROOT}/places:searchText", headers=headers, json=body)
+    if r.status_code != 200:
+        return None
+    places_ = r.json().get("places") or []
+    if not places_:
+        return None
+    p = places_[0]
+    loc = p.get("location") or {}
+    lat = loc.get("latitude")
+    lng = loc.get("longitude")
+    if lat is None or lng is None:
+        return None
+    return float(lat), float(lng)
 
-def nearby_search_apartments(center: dict, *, radius_m: int, page_size: int = 15) -> list[dict]:
-    """
-    POST places:searchNearby with apartment-related includedTypes.
-    center = {"lat": float, "lng": float}
-    """
+def nearby_search_apartments(center: dict, *, radius_m: int, page_size: int = 15, strict: bool = True) -> list[dict]:
     headers = {**_auth_headers(), "X-Goog-FieldMask": SEARCH_FIELD_MASK}
-    lat = float(center["lat"])
-    lng = float(center["lng"])
+    lat = float(center["lat"]); lng = float(center["lng"])
     body = {
-        "locationRestriction": {
-            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}
-        },
-        "includedTypes": ALLOWED_APARTMENT_TYPES,
+        "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}},
         "pageSize": max(1, min(int(page_size or 15), 20)),
     }
+    if strict:
+        body["includedTypes"] = ALLOWED_APARTMENT_TYPES
     with _client() as c:
         r = c.post(f"{API_ROOT}/places:searchNearby", headers=headers, json=body)
     if r.status_code != 200:
         raise PlacesError(f"searchNearby failed {r.status_code}: {r.text[:300]}")
     return r.json().get("places") or []
 
-
 def search_nearby_v1(center: dict, *, radius_m: int, included_types: list[str] | None, max_results: int = 20) -> dict:
-    """
-    General nearby search used by NearbyAround endpoint.
-    Returns response dict with key 'places'.
-    """
     headers = {**_auth_headers(), "X-Goog-FieldMask": SEARCH_FIELD_MASK}
-    lat = float(center["lat"])
-    lng = float(center["lng"])
+    lat = float(center["lat"]); lng = float(center["lng"])
     body = {
-        "locationRestriction": {
-            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}
-        },
+        "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}},
         "pageSize": max(1, min(int(max_results or 20), 20)),
     }
     if included_types:
@@ -123,13 +132,7 @@ def search_nearby_v1(center: dict, *, radius_m: int, included_types: list[str] |
         raise PlacesError(f"searchNearby_v1 failed {r.status_code}: {r.text[:300]}")
     return r.json()
 
-
-# ------------------------- Details -------------------------
-
 def details_v1(place_id: str, fields: list[str]) -> dict:
-    """
-    GET places/{place_id}. Field mask here is for a single Place (no 'places.' prefix).
-    """
     headers = _auth_headers()
     if fields:
         headers["X-Goog-FieldMask"] = ",".join(fields)
@@ -139,21 +142,16 @@ def details_v1(place_id: str, fields: list[str]) -> dict:
         raise PlacesError(f"details_v1 failed {r.status_code}: {r.text[:300]}")
     return r.json()
 
-
 # ------------------------- Normalizers -------------------------
 
 def _first_photo_name(p: dict) -> str | None:
     photos = p.get("photos") or []
-    if not photos:
-        return None
+    if not photos: return None
     return photos[0].get("name") or None
 
-
 def _name_text(val):
-    if isinstance(val, dict):
-        return val.get("text")
+    if isinstance(val, dict): return val.get("text")
     return val
-
 
 def normalize_place(p: dict) -> dict:
     return {
@@ -171,7 +169,6 @@ def normalize_place(p: dict) -> dict:
         "userRatingCount": p.get("userRatingCount"),
     }
 
-
 def normalize_v1_place_basic(p: dict) -> dict:
     return {
         "id": p.get("id"),
@@ -184,7 +181,6 @@ def normalize_v1_place_basic(p: dict) -> dict:
         "types": p.get("types") or [],
         "photoName": _first_photo_name(p),
     }
-
 
 def normalize_details_basic(p: dict) -> dict:
     return {
