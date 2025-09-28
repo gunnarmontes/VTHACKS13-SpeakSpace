@@ -1,5 +1,5 @@
 """
-Django settings for backend project.
+Django settings for backend project (MVP-friendly for Render).
 """
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from datetime import timedelta
 # Load environment
 # ----------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv()  # loads .env (local) if present
+load_dotenv()  # loads .env locally; on Render, use Dashboard env vars
 
 # ----------------------------------------------------------------------
 # Core
@@ -21,7 +21,7 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # Hosts / CORS
 RENDER_HOST = "vthacks13-speakspace.onrender.com"
-VERCEL_HOST = "vthacks13-speakspace.vercel.app"
+VERCEL_HOST = "vthacks13-speakspace.vercel.app"  # if you deploy FE there later
 
 if DEBUG:
     ALLOWED_HOSTS = ["*", "localhost", "127.0.0.1"]
@@ -37,23 +37,29 @@ if DEBUG:
         "http://127.0.0.1:8000",
     ]
 else:
-    # Production: be explicit. We still allow local Vite to call the prod API.
+    # Production: be explicit. Allow your Render API host and (optionally) your local FE for testing.
     ALLOWED_HOSTS = [RENDER_HOST, VERCEL_HOST, "localhost", "127.0.0.1"]
     CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = [
-        "http://localhost:5173",                        # local Vite → prod API
-        f"https://{RENDER_HOST}",                      # (same-origin ok, but harmless)
-        f"https://{VERCEL_HOST}",                      # if you ever host FE on Vercel
+        "http://localhost:5173",                         # local Vite → prod API (optional)
+        "http://127.0.0.1:5173",                         # local Vite → prod API (optional)
+        f"https://{RENDER_HOST}",                        # same-origin; harmless to keep
+        f"https://{VERCEL_HOST}",                        # if/when FE on Vercel
     ]
     CSRF_TRUSTED_ORIGINS = [
         f"https://{RENDER_HOST}",
         f"https://{VERCEL_HOST}",
+        "http://localhost:5173",                         # only needed if you use cookie auth
+        "http://127.0.0.1:5173",                         # only needed if you use cookie auth
     ]
 
 # Behind a proxy (Render/Heroku style)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
-# If you use cookies anywhere (not required for your JWT flows, but safe defaults)
+# Strict HTTPS in production
+SECURE_SSL_REDIRECT = not DEBUG
+
+# Cookies: secure in prod; relaxed in dev (JWT is primary, but these are safe defaults)
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = "Lax"
@@ -61,9 +67,8 @@ CSRF_COOKIE_SAMESITE = "Lax"
 
 # ----------------------------------------------------------------------
 # External service keys (read from env)
-# (Access these directly via os.environ in your app modules.)
 # ----------------------------------------------------------------------
-# Support either env var name for Google:
+# Support either env var name for Google Places/Maps server-side.
 os.environ.setdefault(
     "GOOGLE_MAPS_API_KEY",
     os.getenv("GOOGLE_MAPS_API_KEY") or os.getenv("GOOGLE_PLACES_KEY", "")
@@ -89,15 +94,19 @@ INSTALLED_APPS = [
     # your apps
     "authapp",
     "mapapp",
-    "voiceagent",   # if you still use it
-    # if you created these (recommended for tools / voice endpoints):
+    "voiceagent",
     "agenttools",
-
 ]
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",  # keep CORS first
+    "corsheaders.middleware.CorsMiddleware",  # keep CORS very early
     "django.middleware.security.SecurityMiddleware",
+    # WhiteNoise (static) in prod only (optional, but handy on Render)
+    *(
+        ["whitenoise.middleware.WhiteNoiseMiddleware"]
+        if not DEBUG
+        else []
+    ),
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -111,6 +120,7 @@ MIDDLEWARE = [
 # ----------------------------------------------------------------------
 ASGI_APPLICATION = "backend.asgi.application"
 CHANNEL_LAYERS = {
+    # OK for MVP (single instance). Use Redis for scale or worker processes.
     "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}
 }
 
@@ -122,7 +132,7 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",  # tighten per-view where needed
+        "rest_framework.permissions.AllowAny",  # tighten per-view as needed
     ],
 }
 
@@ -156,7 +166,8 @@ TEMPLATES = [
 WSGI_APPLICATION = "backend.wsgi.application"
 
 # ----------------------------------------------------------------------
-# Database (SQLite for dev; consider Postgres in prod)
+# Database (SQLite for MVP; use Postgres for persistence)
+#   ⚠️ On Render, SQLite is ephemeral across redeploys/restarts.
 # ----------------------------------------------------------------------
 DATABASES = {
     "default": {
@@ -164,6 +175,7 @@ DATABASES = {
         "NAME": BASE_DIR / "db.sqlite3",
     }
 }
+# If/when you add Postgres, set DATABASE_URL in env and parse with dj-database-url.
 
 # ----------------------------------------------------------------------
 # Password validation
@@ -188,5 +200,10 @@ USE_TZ = True
 # ----------------------------------------------------------------------
 STATIC_URL = "static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
+# WhiteNoise settings (only active when middleware added in prod)
+if not DEBUG:
+    # gzip/brotli compression and long cache headers for versioned files
+    STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
