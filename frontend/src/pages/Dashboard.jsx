@@ -195,11 +195,18 @@ export default function Dashboard() {
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const onMsg = (e) => {
+      // Only accept messages from our origin (AgentBridge posts same-origin)
+      try {
+        const allowedOrigin = window.location.origin;
+        if (e?.origin && e.origin !== allowedOrigin) return;
+      } catch (_) {}
+
       const msg = e?.data;
-      if (!msg) return;
+      if (!msg || typeof msg !== "object" || !msg.type) return;
+      const t = String(msg.type);
 
       // 1) Agent pushed results directly
-      if (msg.type === "AGENT_RESULTS" && msg.data) {
+      if (t === "AGENT_RESULTS" && msg.data) {
         const params = msg.params || { mode: "text", q: "" };
         const results = Array.isArray(msg.data?.results) ? msg.data.results : [];
         setQ(params.q || "");
@@ -210,14 +217,14 @@ export default function Dashboard() {
       }
 
       // 2) Agent asked app to perform a search
-      if (msg.type === "AGENT_SEARCH" && msg.params) {
+      if (t === "AGENT_SEARCH" && msg.params) {
         runSearch(msg.params, { source: "agent" });
         return;
       }
 
       // 3) Agent UI commands
-      if (msg.type === "AGENT_UI" && msg.action) {
-        const a = msg.action.toUpperCase();
+      if (t === "AGENT_UI" && msg.action) {
+        const a = String(msg.action).toUpperCase();
         const p = msg.payload || {};
 
         if (a === "OPEN_LISTING" && p.id) {

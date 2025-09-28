@@ -14,6 +14,9 @@ from rest_framework.views import APIView
 
 from .services import places
 from .serializers import SearchQuerySerializer, PlaceSerializer
+from django.core.cache import cache
+from django.views.decorators.http import require_POST
+from django.utils.decorators import method_decorator
 
 logger = logging.getLogger(__name__)
 
@@ -234,3 +237,26 @@ class NearbyAround(APIView):
         items = data.get("places") or []
         results = [places.normalize_v1_place_basic(p) for p in items]
         return Response({"results": results})
+
+
+# Debug-only helper: enqueue a canned agent command into the mailbox used by AgentCommandView
+@method_decorator(require_POST, name="dispatch")
+class AgentTestEnqueue(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        # Only allow when DEBUG is enabled to avoid exposing in production
+        if not settings.DEBUG:
+            return Response({"ok": False, "error": "Not available"}, status=403)
+
+        # Accept optional body to override defaults
+        body = request.data or {}
+        msg = {
+            "type": body.get("type", "AGENT_UI"),
+            "action": body.get("action", "NAVIGATE_SEARCH"),
+            "payload": body.get("payload", {"mode": "text", "q": body.get("q", "Norfolk, Virginia")}),
+        }
+        # write into the same cache slot used by agent_bridge
+        cache.set("agent_ui_command", msg, timeout=30)
+        return Response({"ok": True, "enqueued": msg})
