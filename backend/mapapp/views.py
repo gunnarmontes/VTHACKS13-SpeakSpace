@@ -15,8 +15,13 @@ from .serializers import SearchQuerySerializer, PlaceSerializer  # ▶️ NEW
 import logging
 logger = logging.getLogger(__name__)
 
+from rest_framework.permissions import AllowAny
+
+
 
 def bounds_to_center_radius(sw: str, ne: str) -> Optional[Tuple[float, float, int]]:
+
+    
     try:
         sw_lat, sw_lng = map(float, sw.split(","))
         ne_lat, ne_lng = map(float, ne.split(","))
@@ -37,6 +42,9 @@ class PropertySearch(APIView):
     GET /api/properties/search/?mode=text&q=Norfolk,VA
     GET /api/properties/search/?mode=nearby&sw=lat,lng&ne=lat,lng
     """
+
+    permission_classes = [AllowAny]
+
     def get(self, request):
         # ▶️ NEW: validate query params with a serializer
         qp = SearchQuerySerializer(data=request.GET)
@@ -107,6 +115,9 @@ class PlacePhoto(APIView):
     Streams a Google Places (v1) photo without exposing your API key.
     Also supports legacy ref= (v0) if you still need it.
     """
+
+    permission_classes = [AllowAny]
+
     def get(self, request):
         name = request.GET.get("name")  # v1 photo resource name
         maxwidth = request.GET.get("maxwidth", "600")
@@ -144,6 +155,9 @@ class PlacePhoto(APIView):
 
 # mapapp/views.py (PropertyDetail)
 class PropertyDetail(APIView):
+
+    permission_classes = [AllowAny]
+
     def get(self, request, place_id: str):
         try:
             # Base fields only — no reviewSummary
@@ -172,6 +186,9 @@ class NearbyAround(APIView):
     """
     GET /api/places/nearby/?lat=...&lng=...&types=restaurants,bars&radius=1500
     """
+
+    permission_classes = [AllowAny]
+    
     def get(self, request):
         try:
             lat = float(request.GET.get("lat"))

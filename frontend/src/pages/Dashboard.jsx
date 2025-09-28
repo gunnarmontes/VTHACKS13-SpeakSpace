@@ -1,6 +1,6 @@
 // src/pages/Dashboard.jsx
 import React, { useEffect, useState, useRef, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom"; // ← NEW
 import api from "../api";
 import MapView from "../components/MapView";
 import { useSearchStore } from "../searchStore";
@@ -12,6 +12,9 @@ export default function Dashboard() {
   const [selected, setSelected] = useState(null);
   const [mapBounds, setMapBounds] = useState(null);
   const [mapRefState, setMapRefState] = useState(null);
+  const [agentBanner, setAgentBanner] = useState(null); // ← NEW (tiny UX)
+
+  const location = useLocation(); // ← NEW
 
   const {
     getResults,
@@ -47,7 +50,7 @@ export default function Dashboard() {
 
   // Cache-aware search runner
   const runSearch = useCallback(
-    async (params) => {
+    async (params, { source } = {}) => {
       setLoading(true);
       setSelected(null);
 
@@ -56,6 +59,7 @@ export default function Dashboard() {
         setProperties(cached.results);
         markRestored(true);
         setLoading(false);
+        if (source === "agent") setAgentBanner(`Updated from voice agent (${params.mode})`);
         return;
       }
 
@@ -65,6 +69,7 @@ export default function Dashboard() {
         setProperties(results);
         saveResults(params, results, mapRefState || null);
         markRestored(false);
+        if (source === "agent") setAgentBanner(`Updated from voice agent (${params.mode})`);
       } catch (err) {
         console.error("Search failed:", err);
         setProperties([]);
@@ -112,6 +117,43 @@ export default function Dashboard() {
     map.addListener("idle", save);
   };
 
+  // 🔹 NEW: auto-run search when URL has mode/q (e.g. /dashboard?mode=text&q=24060)
+  useEffect(() => {
+    const sp = new URLSearchParams(location.search);
+    const mode = (sp.get("mode") || "").toLowerCase();
+    const qParam = sp.get("q")?.trim();
+    const sw = sp.get("sw");
+    const ne = sp.get("ne");
+
+    if (mode === "text" && qParam) {
+      setQ(qParam);
+      runSearch({ mode: "text", q: qParam }, { source: "agent" });
+    } else if (mode === "nearby" && sw && ne) {
+      runSearch({ mode: "nearby", sw, ne }, { source: "agent" });
+    }
+  }, [location.search, runSearch]);
+
+  // 🔹 OPTIONAL: allow agent to push results without navigating (postMessage bridge)
+  useEffect(() => {
+    const onMsg = (e) => {
+      const msg = e?.data;
+      if (msg?.type === "AGENT_RESULTS" && msg?.data) {
+        const params = msg.params || { mode: "text", q: "" };
+        const results = msg.data?.results || [];
+        setQ(params.q || "");
+        setProperties(results);
+        markRestored(false);
+        setAgentBanner("Updated from voice agent");
+      }
+      if (msg?.type === "AGENT_SEARCH" && msg?.params) {
+        // Let agent request a search; we run it here (no navigation needed)
+        runSearch(msg.params, { source: "agent" });
+      }
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [runSearch, markRestored]);
+
   // Save sidebar scroll position on unmount
   useEffect(() => {
     return () => {
@@ -138,7 +180,7 @@ export default function Dashboard() {
         <form onSubmit={handleTextSearch} style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           <input
             type="text"
-            placeholder="Search city or zip (e.g., Norfolk, VA)"
+            placeholder="Search city or zip (e.g., 24060)"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             style={{ flex: 1, padding: 8 }}
@@ -156,6 +198,23 @@ export default function Dashboard() {
         >
           {loading ? "Searching…" : "Search this area"}
         </button>
+
+        {/* Agent banner (tiny feedback when voice agent triggers updates) */}
+        {agentBanner && (
+          <div
+            style={{
+              background: "#f0f9ff",
+              border: "1px solid #bae6fd",
+              color: "#075985",
+              padding: "6px 8px",
+              borderRadius: 6,
+              marginBottom: 10,
+              fontSize: 12,
+            }}
+          >
+            {agentBanner}
+          </div>
+        )}
 
         {/* Restored banner */}
         {lastRestored && (
@@ -205,7 +264,13 @@ export default function Dashboard() {
                   <img
                     src={p.image_url}
                     alt={p.name || "Apartment photo"}
-                    style={{ width: "100%", height: 140, objectFit: "cover", borderRadius: 6, marginTop: 8 }}
+                    style={{
+                      width: "100%",
+                      height: 140,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      marginTop: 8,
+                    }}
                     loading="lazy"
                   />
                 )}

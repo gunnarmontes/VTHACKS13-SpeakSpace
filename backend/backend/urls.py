@@ -22,5 +22,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/auth/", include("authapp.urls")),  # our auth routes
     path("api/", include("mapapp.urls")),
+    path("api/", include("voiceagent.urls")),  # ← NEW
 ]
 
