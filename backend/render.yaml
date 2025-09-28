@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: vthacks-backend
+    env: python
+    rootDir: ./backend
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "daphne backend.asgi:application --port $PORT --bind 0.0.0.0 -v2"
+    plan: free
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        sync: false
+      - key: DEBUG
+        value: "False"
+      - key: GOOGLE_PLACES_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ELEVEN_API_KEY
+        sync: false
+      - key: ELEVENLABS_AGENT_BEARER
+        sync: false
+      - key: PUBLIC_BASE_URL
+        value: "https://vthacks-backend.onrender.com"
