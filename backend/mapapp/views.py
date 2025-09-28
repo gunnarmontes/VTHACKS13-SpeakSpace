@@ -124,19 +124,33 @@ class PlacePhoto(APIView):
         maxheight = request.GET.get("maxheight", "400")
 
         if name:
+            if not settings.GOOGLE_PLACES_KEY:
+                msg = "Missing GOOGLE_PLACES_KEY in server configuration."
+                if settings.DEBUG:
+                    return HttpResponse(msg, status=500)
+                return HttpResponse(status=502)
+
             media_url = f"https://places.googleapis.com/v1/{name}/media"
             params = {
                 "maxWidthPx": maxwidth,
                 "maxHeightPx": maxheight,
                 "key": settings.GOOGLE_PLACES_KEY,
             }
-            with httpx.Client(timeout=10.0, follow_redirects=True) as c:
-                r = c.get(media_url, params=params)
-                if r.status_code != 200 or "image" not in r.headers.get("content-type", ""):
-                    return HttpResponse(status=502)
-                resp = HttpResponse(r.content, content_type=r.headers["content-type"])
-                resp["Cache-Control"] = "public, max-age=86400"
-                return resp
+            try:
+                with httpx.Client(timeout=10.0, follow_redirects=True) as c:
+                    r = c.get(media_url, params=params)
+            except Exception as e:
+                logger.exception("Error fetching place photo: %s", e)
+                return HttpResponse(status=502)
+
+            if r.status_code != 200 or "image" not in r.headers.get("content-type", ""):
+                if settings.DEBUG:
+                    return HttpResponse(f"Upstream returned {r.status_code}: {r.text}", status=502)
+                return HttpResponse(status=502)
+
+            resp = HttpResponse(r.content, content_type=r.headers["content-type"])
+            resp["Cache-Control"] = "public, max-age=86400"
+            return resp
 
         ref = request.GET.get("ref")
         if ref:
@@ -188,7 +202,7 @@ class NearbyAround(APIView):
     """
 
     permission_classes = [AllowAny]
-    
+
     def get(self, request):
         try:
             lat = float(request.GET.get("lat"))

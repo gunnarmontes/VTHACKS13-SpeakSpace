@@ -23,5 +23,7 @@ urlpatterns = [
     path("api/auth/", include("authapp.urls")),  # our auth routes
     path("api/", include("mapapp.urls")),
     path("api/", include("voiceagent.urls")),  # ← NEW
+    path("api/", include("agenttools.urls")),
+
 ]
 

@@ -1,24 +1,36 @@
 // src/pages/Dashboard.jsx
-import React, { useEffect, useState, useRef, useCallback } from "react";
-import { Link, useLocation } from "react-router-dom"; // ← NEW
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { Link, useLocation } from "react-router-dom";
 import api from "../api";
 import MapView from "../components/MapView";
 import { useSearchStore } from "../searchStore";
 
+/**
+ * Dashboard
+ * - Restores last results/map/scroll
+ * - Runs searches (text or nearby) with cache-awareness
+ * - Reacts to voice-agent navigation (/dashboard?mode=...&q=... or &sw/ne)
+ * - Optional postMessage bridge if you keep it
+ * - Persists map state on idle
+ */
 export default function Dashboard() {
+  // ---------------------------------------------------------------------------
+  // Local state
+  // ---------------------------------------------------------------------------
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [properties, setProperties] = useState([]);
   const [selected, setSelected] = useState(null);
   const [mapBounds, setMapBounds] = useState(null);
   const [mapRefState, setMapRefState] = useState(null);
-  const [agentBanner, setAgentBanner] = useState(null); // ← NEW (tiny UX)
+  const [agentBanner, setAgentBanner] = useState(null);
 
-  const location = useLocation(); // ← NEW
+  // Router
+  const location = useLocation();
 
+  // Store (zustand)
   const {
     getResults,
-    getResultsOrLast,
     saveResults,
     getLast,
     saveMapState,
@@ -28,32 +40,60 @@ export default function Dashboard() {
     setSidebarScroll,
   } = useSearchStore();
 
+  // Refs
   const sidebarRef = useRef(null);
-
-  // Restore last results + map + scroll on first mount
   const hasRestored = useRef(false);
+
+  // Axios cancellation per runSearch to avoid race-y state updates
+  const currentAbortRef = useRef(null);
+
+  // For building absolute URLs when needed (e.g., photos) – safe base
+  const API_BASE = useMemo(() => {
+    const raw = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+    return raw.replace(/\/+$/, "");
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // One-time restore of last session (results+map+scroll)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (hasRestored.current) return;
     hasRestored.current = true;
+
     const last = getLast();
     if (last?.results?.length) {
-      setProperties(last.results);
+      setProperties(Array.isArray(last.results) ? last.results : []);
       if (last.params?.mode === "text") setQ(last.params.q || "");
       if (last.mapState) setMapRefState(last.mapState);
       markRestored(true);
+
       // restore scroll after paint
       requestAnimationFrame(() => {
-        if (sidebarRef.current) sidebarRef.current.scrollTop = sidebarScrollTop || 0;
+        if (sidebarRef.current) {
+          sidebarRef.current.scrollTop = sidebarScrollTop || 0;
+        }
       });
     }
   }, [getLast, markRestored, sidebarScrollTop]);
 
-  // Cache-aware search runner
+  // ---------------------------------------------------------------------------
+  // Cache-aware search runner (text or nearby)
+  // ---------------------------------------------------------------------------
   const runSearch = useCallback(
     async (params, { source } = {}) => {
+      // Cancel any in-flight request
+      if (currentAbortRef.current) {
+        try {
+          currentAbortRef.current.abort();
+        } catch (_) {}
+      }
+      const controller = new AbortController();
+      currentAbortRef.current = controller;
+
       setLoading(true);
       setSelected(null);
 
+      // Cache check
       const cached = getResults(params);
       if (cached?.results?.length) {
         setProperties(cached.results);
@@ -64,15 +104,26 @@ export default function Dashboard() {
       }
 
       try {
-        const { data } = await api.get("/api/properties/search/", { params });
-        const results = data?.results || [];
+        const { data } = await api.get("/api/properties/search/", {
+          params,
+          signal: controller.signal,
+        });
+
+        const results = Array.isArray(data?.results) ? data.results : [];
         setProperties(results);
+
+        // Persist results + current map snapshot (if we have one)
         saveResults(params, results, mapRefState || null);
+
         markRestored(false);
         if (source === "agent") setAgentBanner(`Updated from voice agent (${params.mode})`);
       } catch (err) {
-        console.error("Search failed:", err);
-        setProperties([]);
+        if (controller.signal.aborted) {
+          // Silently ignore if this request was superseded
+        } else {
+          console.error("Search failed:", err);
+          setProperties([]);
+        }
       } finally {
         setLoading(false);
       }
@@ -80,51 +131,70 @@ export default function Dashboard() {
     [getResults, saveResults, mapRefState, markRestored]
   );
 
-  const handleTextSearch = (e) => {
-    e?.preventDefault();
-    const query = q.trim();
-    if (!query || loading) return;
-    runSearch({ mode: "text", q: query });
-  };
+  // ---------------------------------------------------------------------------
+  // Handlers for UI-initiated searches
+  // ---------------------------------------------------------------------------
+  const handleTextSearch = useCallback(
+    (e) => {
+      e?.preventDefault();
+      const query = q.trim();
+      if (!query || loading) return;
+      runSearch({ mode: "text", q: query });
+    },
+    [q, loading, runSearch]
+  );
 
-  const handleAreaSearch = () => {
+  const handleAreaSearch = useCallback(() => {
     if (!mapBounds || loading) return;
     runSearch({
       mode: "nearby",
-      ne: `${mapBounds.neLat},${mapBounds.neLng}`,
-      sw: `${mapBounds.swLat},${mapBounds.swLng}`,
+      ne: `${mapBounds?.neLat},${mapBounds?.neLng}`,
+      sw: `${mapBounds?.swLat},${mapBounds?.swLng}`,
     });
-  };
+  }, [mapBounds, loading, runSearch]);
 
-  // Persist map center/zoom
-  const handleMapLoad = (map) => {
-    const save = () => {
-      const center = map.getCenter();
-      const zoom = map.getZoom();
-      const mapState = { center: { lat: center.lat(), lng: center.lng() }, zoom };
-      const paramsGuess = q
-        ? { mode: "text", q }
-        : mapBounds
-        ? {
-            mode: "nearby",
-            sw: `${mapBounds.swLat},${mapBounds.swLng}`,
-            ne: `${mapBounds.neLat},${mapBounds.neLng}`,
-          }
-        : { mode: "text", q: "" };
-      saveMapState(paramsGuess, mapState);
-      setMapRefState(mapState);
-    };
-    map.addListener("idle", save);
-  };
+  // ---------------------------------------------------------------------------
+  // Persist map center/zoom on idle (also snapshot into store keyed by params)
+  // ---------------------------------------------------------------------------
+  const handleMapLoad = useCallback(
+    (map) => {
+      const save = () => {
+        const center = map.getCenter();
+        const zoom = map.getZoom();
+        const mapState = { center: { lat: center.lat(), lng: center.lng() }, zoom };
 
-  // 🔹 NEW: auto-run search when URL has mode/q (e.g. /dashboard?mode=text&q=24060)
+        // Guess current params for associating map state
+        const paramsGuess = q
+          ? { mode: "text", q }
+          : mapBounds
+          ? {
+              mode: "nearby",
+              sw: `${mapBounds.swLat},${mapBounds.swLng}`,
+              ne: `${mapBounds.neLat},${mapBounds.neLng}`,
+            }
+          : { mode: "text", q: "" };
+
+        saveMapState(paramsGuess, mapState);
+        setMapRefState(mapState);
+      };
+
+      map.addListener("idle", save);
+    },
+    [q, mapBounds, saveMapState]
+  );
+
+  // ---------------------------------------------------------------------------
+  // React to navigation like /dashboard?mode=text&q=24060 or nearby with sw/ne
+  // (voice-agent "Approach A")
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     const sp = new URLSearchParams(location.search);
     const mode = (sp.get("mode") || "").toLowerCase();
-    const qParam = sp.get("q")?.trim();
+    const qParam = (sp.get("q") || "").trim();
     const sw = sp.get("sw");
     const ne = sp.get("ne");
 
+    // Only trigger if params actually changed meaningfully
     if (mode === "text" && qParam) {
       setQ(qParam);
       runSearch({ mode: "text", q: qParam }, { source: "agent" });
@@ -133,20 +203,21 @@ export default function Dashboard() {
     }
   }, [location.search, runSearch]);
 
-  // 🔹 OPTIONAL: allow agent to push results without navigating (postMessage bridge)
+  // ---------------------------------------------------------------------------
+  // Optional postMessage bridge (keep if you want agent → UI without nav)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     const onMsg = (e) => {
       const msg = e?.data;
       if (msg?.type === "AGENT_RESULTS" && msg?.data) {
         const params = msg.params || { mode: "text", q: "" };
-        const results = msg.data?.results || [];
+        const results = Array.isArray(msg.data?.results) ? msg.data.results : [];
         setQ(params.q || "");
         setProperties(results);
         markRestored(false);
         setAgentBanner("Updated from voice agent");
       }
       if (msg?.type === "AGENT_SEARCH" && msg?.params) {
-        // Let agent request a search; we run it here (no navigation needed)
         runSearch(msg.params, { source: "agent" });
       }
     };
@@ -154,13 +225,30 @@ export default function Dashboard() {
     return () => window.removeEventListener("message", onMsg);
   }, [runSearch, markRestored]);
 
-  // Save sidebar scroll position on unmount
+  // ---------------------------------------------------------------------------
+  // UX niceties: clear banner after a bit; persist sidebar scroll on unmount
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!agentBanner) return;
+    const id = setTimeout(() => setAgentBanner(null), 3500);
+    return () => clearTimeout(id);
+  }, [agentBanner]);
+
   useEffect(() => {
     return () => {
       if (sidebarRef.current) setSidebarScroll(sidebarRef.current.scrollTop || 0);
+      // cancel any in-flight request to avoid setState on unmounted component
+      if (currentAbortRef.current) {
+        try {
+          currentAbortRef.current.abort();
+        } catch (_) {}
+      }
     };
   }, [setSidebarScroll]);
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
       {/* Sidebar */}
@@ -183,9 +271,13 @@ export default function Dashboard() {
             placeholder="Search city or zip (e.g., 24060)"
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleTextSearch(e);
+            }}
             style={{ flex: 1, padding: 8 }}
+            aria-label="Search city or zip"
           />
-          <button type="submit" disabled={loading}>
+          <button type="submit" disabled={loading} aria-busy={loading}>
             {loading ? "Searching…" : "Search"}
           </button>
         </form>
@@ -202,6 +294,7 @@ export default function Dashboard() {
         {/* Agent banner (tiny feedback when voice agent triggers updates) */}
         {agentBanner && (
           <div
+            role="status"
             style={{
               background: "#f0f9ff",
               border: "1px solid #bae6fd",
@@ -257,10 +350,29 @@ export default function Dashboard() {
                 }}
               >
                 <div style={{ fontWeight: 600 }}>{p.name || "Unnamed"}</div>
+
                 {p.address && (
                   <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{p.address}</div>
                 )}
-                {p.image_url && (
+
+                {/* If your backend gives a Places v1 name, prefer requesting through your photo proxy.
+                   Otherwise keep p.image_url as-is. */}
+                {p.photoName ? (
+                  <img
+                    src={`${API_BASE}/api/places/photo/?name=${encodeURIComponent(
+                      p.photoName
+                    )}&maxwidth=640&maxheight=400`}
+                    alt={p.name || "Apartment photo"}
+                    style={{
+                      width: "100%",
+                      height: 140,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      marginTop: 8,
+                    }}
+                    loading="lazy"
+                  />
+                ) : p.image_url ? (
                   <img
                     src={p.image_url}
                     alt={p.name || "Apartment photo"}
@@ -273,7 +385,7 @@ export default function Dashboard() {
                     }}
                     loading="lazy"
                   />
-                )}
+                ) : null}
               </div>
             </Link>
           ))
