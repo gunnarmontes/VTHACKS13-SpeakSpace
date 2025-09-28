@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GoogleMap, Marker, InfoWindow, useLoadScript, MarkerClusterer, OverlayView } from "@react-google-maps/api";
+import { buildPhotoSrc } from "../lib/image";
+import { Link } from "react-router-dom";
 import { useSearchStore } from "../searchStore";
 
 // outer wrapper: gray padded area around the map
@@ -124,6 +126,21 @@ export default function NearbyExplorer({ place, radius = 1500 }) {
         pending -= 1;
         if (status === window.google.maps.places.PlacesServiceStatus.OK && places && places.length) {
           places.forEach((p) => {
+            // Extract a client-safe photo URL if available via the Places JS API.
+            // p.photos[0].getUrl(...) returns a usable URL for the client and
+            // avoids needing to expose backend keys. If you prefer server
+            // proxying, you could instead use a photo reference + backend.
+            let image_url = null;
+            try {
+              if (p.photos && p.photos.length && typeof p.photos[0].getUrl === "function") {
+                image_url = p.photos[0].getUrl({ maxWidth: 480, maxHeight: 320 });
+              }
+            } catch (e) {
+              image_url = null;
+            }
+
+            // Build a maps URL that links to the place (fallback if p.url is not provided)
+            const mapsUrl = p.url || (p.place_id ? `https://www.google.com/maps/search/?api=1&query_place_id=${p.place_id}` : null);
             results.push({
               place_id: p.place_id || p.id,
               name: p.name,
@@ -132,6 +149,9 @@ export default function NearbyExplorer({ place, radius = 1500 }) {
               rating: p.rating,
               user_ratings_total: p.user_ratings_total,
               category: cat,
+              image_url,
+              website: p.website || null,
+              mapsUrl,
             });
           });
         }
@@ -304,12 +324,42 @@ export default function NearbyExplorer({ place, radius = 1500 }) {
             position={{ lat: selectedNearby.location.lat, lng: selectedNearby.location.lng }}
             onCloseClick={() => setSelectedNearby(null)}
           >
-            <div style={{ maxWidth: 260 }}>
-              <div style={{ fontWeight: 700 }}>{selectedNearby.name}</div>
-              {selectedNearby.address && <div style={{ fontSize: 12, color: "#666" }}>{selectedNearby.address}</div>}
-              <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                {selectedNearby.rating != null && <div>⭐ {selectedNearby.rating}</div>}
-                {selectedNearby.user_ratings_total != null && <div style={{ color: "#666" }}>({selectedNearby.user_ratings_total})</div>}
+            <div style={{ maxWidth: 320 }}>
+              {/* Top: two-column layout */}
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                {/* Left column: name, address, rating (stacked) */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>{selectedNearby.name}</div>
+                  {selectedNearby.address && (
+                    <div style={{ fontSize: 13, color: '#555', marginBottom: 8, lineHeight: 1.2 }}>{selectedNearby.address}</div>
+                  )}
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', color: '#333' }}>
+                    {selectedNearby.rating != null && <div style={{ fontSize: 13 }}>⭐ {selectedNearby.rating}</div>}
+                    {selectedNearby.user_ratings_total != null && (
+                      <div style={{ fontSize: 12, color: '#666' }}>({selectedNearby.user_ratings_total})</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right column: thumbnail */}
+                <div style={{ width: 96, flexShrink: 0 }}>
+                  {selectedNearby.image_url ? (
+                    <img src={selectedNearby.image_url} alt={selectedNearby.name} style={{ width: '100%', height: 72, objectFit: 'cover', borderRadius: 6 }} />
+                  ) : (
+                    <div style={{ width: '100%', height: 72, borderRadius: 6, background: '#f3f4f6', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>No image</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Bottom: actions row */}
+              <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+                <Link to={`/listing/${selectedNearby.place_id}`} state={{ place: selectedNearby }} style={{ padding: '6px 8px', background: '#2563eb', color: '#fff', borderRadius: 6, textDecoration: 'none', fontSize: 13 }}>View details</Link>
+                {selectedNearby.website ? (
+                  <a href={selectedNearby.website} target="_blank" rel="noreferrer" style={{ padding: '6px 8px', background: '#eef2ff', color: '#3730a3', borderRadius: 6, textDecoration: 'none', fontSize: 13 }}>Website</a>
+                ) : null}
+                {selectedNearby.mapsUrl ? (
+                  <a href={selectedNearby.mapsUrl} target="_blank" rel="noreferrer" style={{ padding: '6px 8px', background: '#f6f7f9', color: '#333', borderRadius: 6, textDecoration: 'none', fontSize: 13 }}>Directions</a>
+                ) : null}
               </div>
             </div>
           </InfoWindow>

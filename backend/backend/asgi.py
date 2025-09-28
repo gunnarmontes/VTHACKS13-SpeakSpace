@@ -1,18 +1,16 @@
-# backend/backend/asgi.py
+# backend/asgi.py
 import os
 from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.security.websocket import AllowedHostsOriginValidator
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "backend.settings")
+
 django_asgi_app = get_asgi_application()
 
-# Channels wiring
-from channels.routing import ProtocolTypeRouter, URLRouter
-from channels.auth import AuthMiddlewareStack
-import voiceagent.routing
+from voiceagent.routing import websocket_urlpatterns  # noqa: E402
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
-    "websocket": AuthMiddlewareStack(
-        URLRouter(voiceagent.routing.websocket_urlpatterns)
-    ),
+    "websocket": AllowedHostsOriginValidator(URLRouter(websocket_urlpatterns)),
 })

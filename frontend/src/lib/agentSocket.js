@@ -18,4 +18,51 @@ export function connectAgentSocket(onMessage) {
   };
   ws.onclose = () => setTimeout(() => connectAgentSocket(onMessage), 2000);
   return ws;
+}// src/lib/agentSocket.js
+const ORIGIN = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+const TOKEN = import.meta.env.VITE_AGENT_BEARER || "";
+
+function wsUrl() {
+  if (!ORIGIN) return "";
+  const u = new URL(ORIGIN);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  const qs = TOKEN ? `?token=${encodeURIComponent(TOKEN)}` : "";
+  return `${u.toString().replace(/\/+$/, "")}/ws/agent/${qs}`;
 }
+
+export function startAgentSocket() {
+  if (!ORIGIN) return () => {};
+  let ws;
+  let closed = false;
+  const connect = () => {
+    ws = new WebSocket(wsUrl());
+    ws.onopen = () => { try { ws.send(JSON.stringify({ type: "ping" })); } catch {} };
+    ws.onmessage = (e) => { try { window.postMessage(JSON.parse(e.data), "*"); } catch {} };
+    ws.onclose = () => { if (!closed) setTimeout(connect, 1200); };
+    ws.onerror = () => {};
+  };
+  connect();
+  return () => { closed = true; try { ws && ws.close(); } catch {} };
+}
+
+export const agent = {
+  searchText(q) {
+    const u = wsUrl();
+    if (!u) return;
+    const s = new WebSocket(u);
+    s.onopen = () => {
+      s.send(JSON.stringify({ type: "tool.search", params: { mode: "text", q } }));
+      setTimeout(() => s.close(), 150);
+    };
+  },
+  searchNearby(sw, ne) {
+    const u = wsUrl();
+    if (!u) return;
+    const s = new WebSocket(u);
+    s.onopen = () => {
+      s.send(JSON.stringify({ type: "tool.search", params: { mode: "nearby", sw, ne } }));
+      setTimeout(() => s.close(), 150);
+    };
+  },
+};
+

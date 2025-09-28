@@ -49,9 +49,41 @@ export default function Dashboard() {
 
   // API base (absolute origin to deployed backend, no trailing slash)
   const API_BASE = useMemo(() => {
-    const raw = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
-    return raw.replace(/\/+$/, "");
+    // Prefer the Vite-provided env var. If it's not set (dev server not
+    // restarted after editing `.env`), fall back to the deployed host so the
+    // UI can still load images. This is a helpful fallback during debugging.
+    const fallback = "https://vthacks13-speakspace.onrender.com";
+    const raw = import.meta.env.VITE_API_URL || fallback;
+    const base = raw.replace(/\/+$/, "");
+    // Helpful runtime debug so you can verify what the client is using.
+    // Remove or reduce this in production.
+    // eslint-disable-next-line no-console
+    console.debug("API_BASE resolved to:", base);
+    return base;
   }, []);
+
+  // Build a safe, absolute photo src for the UI. Prefer `photoName` (v1
+  // photo resource) and fall back to `image_url`. If `image_url` is
+  // a relative proxy path (starts with `/api`), prefix it with API_BASE so
+  // requests go to the configured backend (deployed host) instead of the
+  // frontend origin.
+  const buildPhotoSrc = useCallback(
+    (p) => {
+      if (!p) return null;
+      if (p.photoName) {
+        return `${API_BASE}/api/places/photo?${new URLSearchParams({
+          name: p.photoName,
+          maxwidth: "640",
+          maxheight: "400",
+        }).toString()}`;
+      }
+      if (p.image_url) {
+        return p.image_url.startsWith("/api") ? `${API_BASE}${p.image_url}` : p.image_url;
+      }
+      return null;
+    },
+    [API_BASE]
+  );
 
   // ---------------------------------------------------------------------------
   // One-time restore of last session (results+map+scroll)
@@ -357,37 +389,24 @@ export default function Dashboard() {
                 )}
 
                 {/* Prefer the backend photo proxy when we have a Places v1 photo name */}
-                {p.photoName ? (
-                  <img
-                    src={`${API_BASE}/api/places/photo/?${new URLSearchParams({
-                      name: p.photoName,
-                      maxwidth: "640",
-                      maxheight: "400",
-                    }).toString()}`}
-                    alt={p.name || "Apartment photo"}
-                    style={{
-                      width: "100%",
-                      height: 140,
-                      objectFit: "cover",
-                      borderRadius: 6,
-                      marginTop: 8,
-                    }}
-                    loading="lazy"
-                  />
-                ) : p.image_url ? (
-                  <img
-                    src={p.image_url}
-                    alt={p.name || "Apartment photo"}
-                    style={{
-                      width: "100%",
-                      height: 140,
-                      objectFit: "cover",
-                      borderRadius: 6,
-                      marginTop: 8,
-                    }}
-                    loading="lazy"
-                  />
-                ) : null}
+                {(() => {
+                  const src = buildPhotoSrc(p);
+                  return src ? (
+                    <img
+                      src={src}
+                      alt={p.name || "Apartment photo"}
+                      style={{
+                        width: "100%",
+                        height: 140,
+                        objectFit: "cover",
+                        borderRadius: 6,
+                        marginTop: 8,
+                      }}
+                      loading="lazy"
+                    />
+                  ) : null;
+                })()}
+
               </div>
             </Link>
           ))

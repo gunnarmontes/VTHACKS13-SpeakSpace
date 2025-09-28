@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import api from "../api";
 import NearbyExplorer from "../components/NearbyExplorer";
+import { buildPhotoSrc } from "../lib/image";
 
 export default function ListingPage() {
   const { id } = useParams();                       // Google place_id
@@ -65,16 +66,19 @@ export default function ListingPage() {
         </div>
       )}
 
-      {place.image_url ? (
-        <img
-          src={place.image_url}
-          alt={place.name || "Apartment photo"}
-          style={{ width: "100%", maxHeight: 360, objectFit: "cover", borderRadius: 8, marginBottom: 12 }}
-          loading="lazy"
-        />
-      ) : (
-        <div style={styles.imageFallback}>No image available</div>
-      )}
+      {(() => {
+        const src = buildPhotoSrc(place);
+        return src ? (
+          <img
+            src={src}
+            alt={place.name || "Apartment photo"}
+            style={{ width: "100%", maxHeight: 360, objectFit: "cover", borderRadius: 8, marginBottom: 12 }}
+            loading="lazy"
+          />
+        ) : (
+          <div style={styles.imageFallback}>No image available</div>
+        );
+      })()}
 
       {/* Quick actions */}
       <div style={styles.actionsRow}>

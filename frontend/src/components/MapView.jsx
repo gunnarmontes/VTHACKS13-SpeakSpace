@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useCallback } from "react";
 import { GoogleMap, Marker, InfoWindow, useLoadScript } from "@react-google-maps/api";
 import { Link } from "react-router-dom"; // ✅ add
+import { buildPhotoSrc } from "../lib/image";
 
 const containerStyle = { width: "100%", height: "100%" };
 
@@ -132,14 +133,17 @@ export default function MapView({
           >
             {/* CARD CONTENT */}
             <div style={card.container} onClick={(e) => e.stopPropagation()}>
-              {selected.image_url && (
-                <img
-                    src={selected.image_url}
+              {(() => {
+                const src = buildPhotoSrc(selected);
+                return src ? (
+                  <img
+                    src={src}
                     alt={selected.name || "Apartment photo"}
                     style={card.image}
                     loading="lazy"
-                />
-              )}
+                  />
+                ) : null;
+              })()}
 
               <div style={card.body}>
                 <div style={card.title}>{selected.name || "Apartment"}</div>
