@@ -1,18 +1,10 @@
 // src/pages/Dashboard.jsx
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import api from "../api";
 import MapView from "../components/MapView";
 import { useSearchStore } from "../searchStore";
 
-/**
- * Dashboard
- * - Restores last results/map/scroll
- * - Runs searches (text or nearby) with cache-awareness
- * - Reacts to voice-agent navigation (/dashboard?mode=...&q=... or &sw/ne)
- * - Optional postMessage bridge if you keep it
- * - Persists map state on idle
- */
 export default function Dashboard() {
   // ---------------------------------------------------------------------------
   // Local state
@@ -27,6 +19,7 @@ export default function Dashboard() {
 
   // Router
   const location = useLocation();
+  const navigate = useNavigate();
 
   // Store (zustand)
   const {
@@ -43,47 +36,16 @@ export default function Dashboard() {
   // Refs
   const sidebarRef = useRef(null);
   const hasRestored = useRef(false);
+  const mapRef = useRef(null); // keep the real map instance for agent map commands
 
   // Axios cancellation per runSearch to avoid race-y state updates
   const currentAbortRef = useRef(null);
 
-  // API base (absolute origin to deployed backend, no trailing slash)
+  // Base URL for absolute image URLs
   const API_BASE = useMemo(() => {
-    // Prefer the Vite-provided env var. If it's not set (dev server not
-    // restarted after editing `.env`), fall back to the deployed host so the
-    // UI can still load images. This is a helpful fallback during debugging.
-    const fallback = "https://vthacks13-speakspace.onrender.com";
-    const raw = import.meta.env.VITE_API_URL || fallback;
-    const base = raw.replace(/\/+$/, "");
-    // Helpful runtime debug so you can verify what the client is using.
-    // Remove or reduce this in production.
-    // eslint-disable-next-line no-console
-    console.debug("API_BASE resolved to:", base);
-    return base;
+    const raw = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+    return raw.replace(/\/+$/, "");
   }, []);
-
-  // Build a safe, absolute photo src for the UI. Prefer `photoName` (v1
-  // photo resource) and fall back to `image_url`. If `image_url` is
-  // a relative proxy path (starts with `/api`), prefix it with API_BASE so
-  // requests go to the configured backend (deployed host) instead of the
-  // frontend origin.
-  const buildPhotoSrc = useCallback(
-    (p) => {
-      if (!p) return null;
-      if (p.photoName) {
-        return `${API_BASE}/api/places/photo?${new URLSearchParams({
-          name: p.photoName,
-          maxwidth: "640",
-          maxheight: "400",
-        }).toString()}`;
-      }
-      if (p.image_url) {
-        return p.image_url.startsWith("/api") ? `${API_BASE}${p.image_url}` : p.image_url;
-      }
-      return null;
-    },
-    [API_BASE]
-  );
 
   // ---------------------------------------------------------------------------
   // One-time restore of last session (results+map+scroll)
@@ -99,7 +61,6 @@ export default function Dashboard() {
       if (last.mapState) setMapRefState(last.mapState);
       markRestored(true);
 
-      // restore scroll after paint
       requestAnimationFrame(() => {
         if (sidebarRef.current) {
           sidebarRef.current.scrollTop = sidebarScrollTop || 0;
@@ -113,11 +74,10 @@ export default function Dashboard() {
   // ---------------------------------------------------------------------------
   const runSearch = useCallback(
     async (params, { source } = {}) => {
-      // Cancel any in-flight request
       if (currentAbortRef.current) {
         try {
           currentAbortRef.current.abort();
-        } catch (_) {}
+        } catch {}
       }
       const controller = new AbortController();
       currentAbortRef.current = controller;
@@ -125,7 +85,6 @@ export default function Dashboard() {
       setLoading(true);
       setSelected(null);
 
-      // Cache check
       const cached = getResults(params);
       if (cached?.results?.length) {
         setProperties(cached.results);
@@ -150,9 +109,7 @@ export default function Dashboard() {
         markRestored(false);
         if (source === "agent") setAgentBanner(`Updated from voice agent (${params.mode})`);
       } catch (err) {
-        if (controller.signal.aborted) {
-          // Silently ignore if this request was superseded
-        } else {
+        if (!controller.signal.aborted) {
           console.error("Search failed:", err);
           setProperties([]);
         }
@@ -164,7 +121,7 @@ export default function Dashboard() {
   );
 
   // ---------------------------------------------------------------------------
-  // Handlers for UI-initiated searches
+  // UI search handlers
   // ---------------------------------------------------------------------------
   const handleTextSearch = useCallback(
     (e) => {
@@ -186,16 +143,16 @@ export default function Dashboard() {
   }, [mapBounds, loading, runSearch]);
 
   // ---------------------------------------------------------------------------
-  // Persist map center/zoom on idle (also snapshot into store keyed by params)
+  // Persist map center/zoom on idle
   // ---------------------------------------------------------------------------
   const handleMapLoad = useCallback(
     (map) => {
+      mapRef.current = map;
       const save = () => {
         const center = map.getCenter();
         const zoom = map.getZoom();
         const mapState = { center: { lat: center.lat(), lng: center.lng() }, zoom };
 
-        // Guess current params for associating map state
         const paramsGuess = q
           ? { mode: "text", q }
           : mapBounds
@@ -216,8 +173,7 @@ export default function Dashboard() {
   );
 
   // ---------------------------------------------------------------------------
-  // React to navigation like /dashboard?mode=text&q=24060 or nearby with sw/ne
-  // (voice-agent "Approach A")
+  // React to navigation like /dashboard?mode=text&q=24060 (Approach A)
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const sp = new URLSearchParams(location.search);
@@ -226,7 +182,6 @@ export default function Dashboard() {
     const sw = sp.get("sw");
     const ne = sp.get("ne");
 
-    // Only trigger if params actually changed meaningfully
     if (mode === "text" && qParam) {
       setQ(qParam);
       runSearch({ mode: "text", q: qParam }, { source: "agent" });
@@ -236,29 +191,84 @@ export default function Dashboard() {
   }, [location.search, runSearch]);
 
   // ---------------------------------------------------------------------------
-  // Optional postMessage bridge (keep if you want agent → UI without nav)
+  // Agent → UI bridge (results, searches, and UI commands)
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const onMsg = (e) => {
       const msg = e?.data;
-      if (msg?.type === "AGENT_RESULTS" && msg?.data) {
+      if (!msg) return;
+
+      // 1) Agent pushed results directly
+      if (msg.type === "AGENT_RESULTS" && msg.data) {
         const params = msg.params || { mode: "text", q: "" };
         const results = Array.isArray(msg.data?.results) ? msg.data.results : [];
         setQ(params.q || "");
         setProperties(results);
         markRestored(false);
         setAgentBanner("Updated from voice agent");
+        return;
       }
-      if (msg?.type === "AGENT_SEARCH" && msg?.params) {
+
+      // 2) Agent asked app to perform a search
+      if (msg.type === "AGENT_SEARCH" && msg.params) {
         runSearch(msg.params, { source: "agent" });
+        return;
+      }
+
+      // 3) Agent UI commands
+      if (msg.type === "AGENT_UI" && msg.action) {
+        const a = msg.action.toUpperCase();
+        const p = msg.payload || {};
+
+        if (a === "OPEN_LISTING" && p.id) {
+          const found = properties.find((x) => x.id === p.id) || null;
+          navigate(`/listing/${p.id}`, { state: { place: found || undefined } });
+          return;
+        }
+
+        if (a === "SELECT_BY_ID" && p.id) {
+          const found = properties.find((x) => x.id === p.id) || null;
+          if (found) setSelected(found);
+          return;
+        }
+
+        if (a === "FOCUS_MAP") {
+          const lat = Number(p.lat);
+          const lng = Number(p.lng);
+          const zoom = p.zoom != null ? Number(p.zoom) : undefined;
+          if (mapRef.current && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+            mapRef.current.panTo({ lat, lng });
+            if (!Number.isNaN(zoom)) mapRef.current.setZoom(zoom);
+          }
+          return;
+        }
+
+        if (a === "NAVIGATE_SEARCH" && p.mode) {
+          // Change URL so the existing effect kicks off the search (Approach A)
+          const sp = new URLSearchParams();
+          sp.set("mode", p.mode);
+          if (p.mode === "text" && p.q) sp.set("q", p.q);
+          if (p.mode === "nearby" && p.sw && p.ne) {
+            sp.set("sw", p.sw);
+            sp.set("ne", p.ne);
+          }
+          navigate(`/dashboard?${sp.toString()}`, { replace: false });
+          return;
+        }
+
+        if (a === "SHOW_BANNER" && p.text) {
+          setAgentBanner(String(p.text).slice(0, 200));
+          return;
+        }
       }
     };
+
     window.addEventListener("message", onMsg);
     return () => window.removeEventListener("message", onMsg);
-  }, [runSearch, markRestored]);
+  }, [navigate, properties, runSearch, markRestored]);
 
   // ---------------------------------------------------------------------------
-  // UX niceties: clear banner after a bit; persist sidebar scroll on unmount
+  // UX niceties
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!agentBanner) return;
@@ -269,11 +279,10 @@ export default function Dashboard() {
   useEffect(() => {
     return () => {
       if (sidebarRef.current) setSidebarScroll(sidebarRef.current.scrollTop || 0);
-      // cancel any in-flight request to avoid setState on unmounted component
       if (currentAbortRef.current) {
         try {
           currentAbortRef.current.abort();
-        } catch (_) {}
+        } catch {}
       }
     };
   }, [setSidebarScroll]);
@@ -309,7 +318,6 @@ export default function Dashboard() {
             style={{ flex: 1, padding: 8 }}
             aria-label="Search city or zip"
           />
-        {/* NOTE: HTML forms submit on Enter automatically; the onKeyDown above is just a helper */}
           <button type="submit" disabled={loading} aria-busy={loading}>
             {loading ? "Searching…" : "Search"}
           </button>
@@ -324,7 +332,6 @@ export default function Dashboard() {
           {loading ? "Searching…" : "Search this area"}
         </button>
 
-        {/* Agent banner (tiny feedback when voice agent triggers updates) */}
         {agentBanner && (
           <div
             role="status"
@@ -342,7 +349,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Restored banner */}
         {lastRestored && (
           <div
             style={{
@@ -388,25 +394,35 @@ export default function Dashboard() {
                   <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>{p.address}</div>
                 )}
 
-                {/* Prefer the backend photo proxy when we have a Places v1 photo name */}
-                {(() => {
-                  const src = buildPhotoSrc(p);
-                  return src ? (
-                    <img
-                      src={src}
-                      alt={p.name || "Apartment photo"}
-                      style={{
-                        width: "100%",
-                        height: 140,
-                        objectFit: "cover",
-                        borderRadius: 6,
-                        marginTop: 8,
-                      }}
-                      loading="lazy"
-                    />
-                  ) : null;
-                })()}
-
+                {p.photoName ? (
+                  <img
+                    src={`${API_BASE}/api/places/photo?name=${encodeURIComponent(
+                      p.photoName
+                    )}&maxwidth=640&maxheight=400`}
+                    alt={p.name || "Apartment photo"}
+                    style={{
+                      width: "100%",
+                      height: 140,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      marginTop: 8,
+                    }}
+                    loading="lazy"
+                  />
+                ) : p.image_url ? (
+                  <img
+                    src={p.image_url}
+                    alt={p.name || "Apartment photo"}
+                    style={{
+                      width: "100%",
+                      height: 140,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      marginTop: 8,
+                    }}
+                    loading="lazy"
+                  />
+                ) : null}
               </div>
             </Link>
           ))
@@ -423,7 +439,7 @@ export default function Dashboard() {
           onSelect={setSelected}
           defaultCenter={mapRefState?.center || { lat: 37.2296, lng: -80.4139 }}
           defaultZoom={mapRefState?.zoom || 13}
-          fitToResults={!mapRefState} // don’t auto-fit if restoring a saved view
+          fitToResults={!mapRefState}
           onMapLoad={handleMapLoad}
           onBoundsChange={setMapBounds}
         />
