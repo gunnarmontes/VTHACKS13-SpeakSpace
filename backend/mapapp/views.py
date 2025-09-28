@@ -12,33 +12,19 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .services import places  # v1-based helpers you already have
+from .services import places  # v1-based helpers
 from .serializers import SearchQuerySerializer, PlaceSerializer
 
 logger = logging.getLogger(__name__)
-
 
 # --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
 def _server_places_key() -> str:
-    """
-    Return the server-side Google key for Places/Maps requests.
-    Prefer GOOGLE_MAPS_API_KEY; fall back to GOOGLE_PLACES_KEY.
-    (We read from env directly so you don't need a settings attribute.)
-    """
-    return (
-        os.getenv("GOOGLE_MAPS_API_KEY")
-        or os.getenv("GOOGLE_PLACES_KEY")
-        or ""
-    )
+    return os.getenv("GOOGLE_MAPS_API_KEY") or os.getenv("GOOGLE_PLACES_KEY") or ""
 
 
 def bounds_to_center_radius(sw: str, ne: str) -> Optional[Tuple[float, float, int]]:
-    """
-    Convert SW/NE bounds into a center point and an approximate search radius (meters).
-    Radius is clamped to [500, 30000] for sane searches.
-    """
     try:
         sw_lat, sw_lng = map(float, sw.split(","))
         ne_lat, ne_lng = map(float, ne.split(","))
@@ -67,40 +53,50 @@ class PropertySearch(APIView):
     """
 
     permission_classes = [AllowAny]
-    authentication_classes = []
+    authentication_classes = []  # ensure no JWT parsing on public GETs
 
     def get(self, request):
-        # Validate query params with a serializer
         qp = SearchQuerySerializer(data=request.GET)
         if not qp.is_valid():
             return Response({"results": [], "error": qp.errors}, status=400)
         params = qp.validated_data
 
         mode = (params.get("mode") or "").strip().lower()
-        q = (params.get("q") or "").strip()
-        sw = params.get("sw")
-        ne = params.get("ne")
+        q    = (params.get("q") or "").strip()
+        sw   = params.get("sw")
+        ne   = params.get("ne")
 
         try:
             raw = []
 
             if mode == "text":
-                search_text = q if q else "apartments"
-                logger.info("Mode=text, q=%s", search_text)
-                raw = places.text_search_apartments(text_query=search_text, page_size=15)
-                if not raw and q:
-                    raw = places.text_search_apartments(text_query=f"apartments near {q}", page_size=15)
+                # Be explicit for recall; try a couple of apartment-focused phrasings.
+                attempts = []
+                if q:
+                    attempts = [
+                        f"apartments near {q}",
+                        f"apartments in {q}",
+                        f"{q} apartments",
+                    ]
+                else:
+                    attempts = ["apartments"]
+
+                for txt in attempts:
+                    logger.info("Text search attempt: %s", txt)
+                    raw = places.text_search_apartments(text_query=txt, page_size=15)
+                    if raw:
+                        break  # stop on first hit
 
             elif mode == "nearby":
                 br = bounds_to_center_radius(sw, ne)
                 if not br:
                     return Response({"results": [], "error": "Invalid bounds."}, status=400)
                 lat, lng, radius_m = br
-                logger.info("Mode=nearby center=(%.5f,%.5f) r=%dm", lat, lng, radius_m)
+                logger.info("Nearby center=(%.5f,%.5f) r=%dm", lat, lng, radius_m)
                 raw = places.nearby_search_apartments({"lat": lat, "lng": lng}, radius_m=radius_m, page_size=15)
 
             else:
-                # Legacy fallback: prefer nearby if only bounds, else text search
+                # Legacy fallback
                 if sw and ne and not q:
                     br = bounds_to_center_radius(sw, ne)
                     if not br:
@@ -108,24 +104,38 @@ class PropertySearch(APIView):
                     lat, lng, radius_m = br
                     raw = places.nearby_search_apartments({"lat": lat, "lng": lng}, radius_m=radius_m, page_size=15)
                 else:
-                    search_text = q if q else "apartments"
-                    raw = places.text_search_apartments(text_query=search_text, page_size=15)
-                    if not raw and q:
-                        raw = places.text_search_apartments(text_query=f"apartments near {q}", page_size=15)
+                    attempts = [f"apartments near {q}", f"apartments in {q}", q or "apartments"]
+                    for txt in attempts:
+                        if not txt:
+                            continue
+                        raw = places.text_search_apartments(text_query=txt, page_size=15)
+                        if raw:
+                            break
 
-            # Normalize -> validate/serialize out
-            normalized = [places.normalize_place(p) for p in raw]
+            # Normalize
+            normalized = [places.normalize_place(p) for p in (raw or [])]
 
-            # Optional guard: keep apartments/related only
-            ALLOWED_TYPES = {"apartment_complex", "property_management_company", "real_estate_agency"}
+            # Loosen the filter: keep common apartment-ish types, else fall back to unfiltered results
+            ALLOWED_TYPES = {
+                "apartment_complex",
+                "apartment_rental_agency",
+                "apartment",
+                "apartment_building",
+                "condominium_complex",
+                "property_management_company",
+                "real_estate_agency",
+            }
+
             filtered = [
-                r
-                for r in normalized
+                r for r in normalized
                 if (r.get("primaryType") in ALLOWED_TYPES)
                 or any(t in ALLOWED_TYPES for t in (r.get("types") or []))
+                or ("apartment" in (r.get("name") or "").lower())
             ]
 
-            serializer = PlaceSerializer(filtered, many=True)
+            out = filtered if filtered else normalized
+
+            serializer = PlaceSerializer(out, many=True)
             logger.info("Returning %d results", len(serializer.data))
             return Response({"results": serializer.data})
 
@@ -140,111 +150,53 @@ class PropertySearch(APIView):
 class PlacePhoto(APIView):
     """
     GET /api/places/photo?name=places/XYZ/photos/ABC&maxwidth=600&maxheight=400
-      - Streams a Google Places (v1) photo without exposing your API key.
-
-    Legacy support:
     GET /api/places/photo?ref=<photoreference>&maxwidth=600
     """
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
         key = _server_places_key()
-        name = (request.GET.get("name") or "").strip()  # v1 photo resource name
-        ref = (request.GET.get("ref") or "").strip()    # legacy photoreference
+        name = (request.GET.get("name") or "").strip()
+        ref = (request.GET.get("ref") or "").strip()
         maxwidth = (request.GET.get("maxwidth") or "600").strip()
         maxheight = (request.GET.get("maxheight") or "400").strip()
 
-        # ---- v1 path: name=places/.../photos/...
         if name:
             if not key:
-                msg = "Server missing GOOGLE_MAPS_API_KEY/GOOGLE_PLACES_KEY"
-                return (
-                    JsonResponse({"detail": msg}, status=500)
-                    if settings.DEBUG
-                    else HttpResponse(status=502)
-                )
+                return (JsonResponse({"detail": "Missing Google key"}, status=500)
+                        if settings.DEBUG else HttpResponse(status=502))
 
             media_url = f"https://places.googleapis.com/v1/{name}/media"
-            # For byte streaming, v1 accepts maxWidthPx / maxHeightPx (Px suffix)
-            params = {
-                "maxWidthPx": maxwidth,
-                "maxHeightPx": maxheight,
-                "key": key,  # could also use header X-Goog-Api-Key
-            }
-
+            params = {"maxWidthPx": maxwidth, "maxHeightPx": maxheight, "key": key}
             try:
                 with httpx.Client(timeout=15.0, follow_redirects=True) as c:
                     r = c.get(media_url, params=params)
             except Exception as e:
-                logger.exception("Error fetching place photo (v1): %s", e)
-                return (
-                    JsonResponse({"detail": str(e)}, status=502)
-                    if settings.DEBUG
-                    else HttpResponse(status=502)
-                )
+                logger.exception("Photo v1 error: %s", e)
+                return HttpResponse(status=502)
 
             ctype = r.headers.get("content-type", "")
             if r.status_code != 200 or "image" not in ctype:
                 if settings.DEBUG:
-                    try:
-                        body = r.json()
-                    except Exception:
-                        body = r.text
-                    return JsonResponse(
-                        {"status": r.status_code, "upstream": body},
-                        status=502,
-                        safe=False,
-                    )
+                    return JsonResponse({"status": r.status_code, "upstream": r.text}, status=502, safe=False)
                 return HttpResponse(status=502)
 
             resp = HttpResponse(r.content, content_type=ctype)
             resp["Cache-Control"] = "public, max-age=86400"
             return resp
 
-        # ---- legacy path: ref=<photoreference>
         if ref:
             if not key:
-                msg = "Server missing GOOGLE_MAPS_API_KEY/GOOGLE_PLACES_KEY"
-                return (
-                    JsonResponse({"detail": msg}, status=500)
-                    if settings.DEBUG
-                    else HttpResponse(status=502)
-                )
-
+                return (JsonResponse({"detail": "Missing Google key"}, status=500)
+                        if settings.DEBUG else HttpResponse(status=502))
             url = "https://maps.googleapis.com/maps/api/place/photo"
-            params = {
-                "photo_reference": ref,
-                "maxwidth": maxwidth,
-                "key": key,
-            }
-
-            try:
-                with httpx.Client(timeout=15.0, follow_redirects=True) as c:
-                    r = c.get(url, params=params)
-            except Exception as e:
-                logger.exception("Error fetching place photo (legacy): %s", e)
-                return (
-                    JsonResponse({"detail": str(e)}, status=502)
-                    if settings.DEBUG
-                    else HttpResponse(status=502)
-                )
-
+            params = {"photo_reference": ref, "maxwidth": maxwidth, "key": key}
+            with httpx.Client(timeout=15.0, follow_redirects=True) as c:
+                r = c.get(url, params=params)
             ctype = r.headers.get("content-type", "")
             if r.status_code != 200 or "image" not in ctype:
-                if settings.DEBUG:
-                    try:
-                        body = r.json()
-                    except Exception:
-                        body = r.text
-                    return JsonResponse(
-                        {"status": r.status_code, "upstream": body},
-                        status=502,
-                        safe=False,
-                    )
                 return HttpResponse(status=502)
-
             resp = HttpResponse(r.content, content_type=ctype)
             resp["Cache-Control"] = "public, max-age=86400"
             return resp
@@ -256,27 +208,14 @@ class PlacePhoto(APIView):
 # Property details
 # --------------------------------------------------------------------------------------
 class PropertyDetail(APIView):
-    """
-    GET /api/properties/<place_id>/
-    Returns basic details (no reviewSummary) for the given Places v1 place_id.
-    """
-
     permission_classes = [AllowAny]
     authentication_classes = []
-    
+
     def get(self, request, place_id: str):
         try:
-            # Base fields only — no reviewSummary
             fields = [
-                "id",
-                "displayName",
-                "formattedAddress",
-                "location",
-                "googleMapsUri",
-                "websiteUri",
-                "rating",
-                "userRatingCount",
-                "photos",
+                "id","displayName","formattedAddress","location",
+                "googleMapsUri","websiteUri","rating","userRatingCount","photos",
             ]
             data = places.details_v1(place_id, fields)
             out = places.normalize_details_basic(data)
@@ -287,24 +226,23 @@ class PropertyDetail(APIView):
 
 
 # --------------------------------------------------------------------------------------
-# Nearby “POIs around here” helper
+# Nearby POIs
 # --------------------------------------------------------------------------------------
 NEARBY_TYPE_MAP: Dict[str, list] = {
     "restaurants": ["restaurant", "cafe"],
-    "bars": ["bar"],
-    "coffee": ["cafe"],
-    "activities": ["park", "movie_theater", "museum", "tourist_attraction"],
-    "shopping": ["shopping_mall"],
-    "gyms": ["gym"],
+    "bars":        ["bar"],
+    "coffee":      ["cafe"],
+    "activities":  ["park", "movie_theater", "museum", "tourist_attraction"],
+    "shopping":    ["shopping_mall"],
+    "gyms":        ["gym"],
 }
-
 
 class NearbyAround(APIView):
     """
     GET /api/places/nearby/?lat=...&lng=...&types=restaurants,bars&radius=1500
     """
-
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def get(self, request):
         try:
@@ -314,7 +252,7 @@ class NearbyAround(APIView):
             return Response({"error": "lat/lng required"}, status=400)
 
         radius = int(request.GET.get("radius", "1500"))
-        radius = max(200, min(radius, 5000))  # sane bounds
+        radius = max(200, min(radius, 5000))
 
         raw_types = (request.GET.get("types") or "").lower().split(",")
         raw_types = [t.strip() for t in raw_types if t.strip()]
@@ -322,7 +260,6 @@ class NearbyAround(APIView):
         included_types: list[str] = []
         for key in raw_types:
             included_types += NEARBY_TYPE_MAP.get(key, [])
-        # If user passed a real Places type directly, keep it
         if not included_types and raw_types:
             included_types = raw_types
 
