@@ -1,227 +1,202 @@
 # mapapp/services/places.py
-from typing import Dict, Any, List, Optional
-from django.conf import settings
-import requests
+"""
+Thin wrapper around Google Places API v1 used by mapapp.views.
+- Accepts either GOOGLE_PLACES_KEY or GOOGLE_MAPS_API_KEY from env.
+- Exposes helpers called by your views:
+    * text_search_apartments(text_query, page_size=15)
+    * nearby_search_apartments(center, radius_m, page_size=15)
+    * search_nearby_v1(center, radius_m, included_types=None, max_results=20)
+    * details_v1(place_id, fields)
+    * normalize_place(p)
+    * normalize_v1_place_basic(p)
+    * normalize_details_basic(p)
+"""
+
+from __future__ import annotations
+import os
 import httpx
 
-PLACES_KEY = getattr(settings, "GOOGLE_PLACES_KEY", "")
-BASE = "https://places.googleapis.com/v1"
-
-# v1 requires a field mask; keep it tight for performance/cost
-FIELD_MASK = ",".join([
-    "places.id",
-    "places.displayName",
-    "places.formattedAddress",
-    "places.location",
-    "places.primaryType",
-    "places.types",
-    "places.rating",
-    "places.userRatingCount",
-    "places.photos",
-    "places.googleMapsUri",
-])
-
-HEADERS = {
-    "X-Goog-Api-Key": PLACES_KEY,
-    "Content-Type": "application/json",
-    "X-Goog-FieldMask": FIELD_MASK,
-}
-
+API_ROOT = "https://places.googleapis.com/v1"
+TIMEOUT = 20.0
 
 class PlacesError(Exception):
     pass
 
 
-def _post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    if not PLACES_KEY:
-        raise PlacesError("Missing GOOGLE_PLACES_KEY.")
-    url = f"{BASE}/{path}"
-    r = requests.post(url, json=body, headers=HEADERS, timeout=10)
-    if r.status_code >= 400:
-        raise PlacesError(f"{r.status_code}: {r.text}")
-    return r.json() if r.text else {}
+def _server_key() -> str:
+    """
+    Prefer GOOGLE_PLACES_KEY; fall back to GOOGLE_MAPS_API_KEY.
+    """
+    return os.getenv("GOOGLE_PLACES_KEY") or os.getenv("GOOGLE_MAPS_API_KEY") or ""
 
 
-def _photo_media_url(photo_name: str, max_w: int = 640, max_h: int = 400) -> str:
-    """
-    We still proxy photos to avoid exposing the API key in the browser.
-    This returns our proxy endpoint with the v1 photo 'name'.
-    """
-    return f"/api/places/photo?name={photo_name}&maxwidth={max_w}&maxheight={max_h}"
-
-
-def text_search_apartments(
-    text_query: str,
-    bias_center: Optional[Dict[str, float]] = None,
-    bias_radius_m: int = 4000,
-    page_size: int = 10,
-) -> List[Dict[str, Any]]:
-    """
-    v1 Text Search with strict type filtering on apartment complexes.
-    """
-    body: Dict[str, Any] = {
-        "textQuery": text_query or "apartments",
-        "includedType": "apartment_complex",
-        "strictTypeFiltering": True,
-        "pageSize": int(page_size),
+def _headers() -> dict:
+    key = _server_key()
+    if not key:
+        raise PlacesError("Missing GOOGLE_PLACES_KEY or GOOGLE_MAPS_API_KEY.")
+    # You can also use query param ?key=...; header keeps URLs clean
+    return {
+        "X-Goog-Api-Key": key,
+        # Ask only for the fields we need to keep payloads small
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,places.location,"
+            "places.googleMapsUri,places.websiteUri,places.primaryType,places.types,"
+            "places.photos.name,places.rating,places.userRatingCount,"
+            "id,displayName,formattedAddress,location,googleMapsUri,websiteUri,"
+            "primaryType,types,photos.name,rating,userRatingCount"
+        ),
     }
-    if bias_center:
-        body["locationBias"] = {
-            "circle": {
-                "center": {"latitude": bias_center["lat"], "longitude": bias_center["lng"]},
-                "radius": float(bias_radius_m),
-            }
-        }
-    data = _post("places:searchText", body)
-    return data.get("places", []) or []
 
 
-def nearby_search_apartments(
-    center: Dict[str, float],
-    radius_m: int = 4000,
-    page_size: int = 10,
-) -> List[Dict[str, Any]]:
+def _client() -> httpx.Client:
+    return httpx.Client(timeout=TIMEOUT, follow_redirects=True)
+
+
+# ------------------------- Search helpers -------------------------
+
+ALLOWED_APARTMENT_TYPES = [
+    "apartment_complex",
+    "property_management_company",
+    "real_estate_agency",
+]
+
+def text_search_apartments(*, text_query: str, page_size: int = 15) -> list[dict]:
     """
-    v1 Nearby Search constrained by a circle (center+radius),
-    filtered to apartment complexes only.
+    POST places:searchText with includedTypes restricted to apartment flavors.
     """
     body = {
-        "includedTypes": ["apartment_complex"],
-        "locationRestriction": {
-            "circle": {
-                "center": {"latitude": center["lat"], "longitude": center["lng"]},
-                "radius": float(radius_m),
-            }
-        },
-        "maxResultCount": int(page_size),
-        "rankPreference": "DISTANCE",
+        "textQuery": text_query,
+        "pageSize": max(1, min(int(page_size or 15), 20)),
+        "includedTypes": ALLOWED_APARTMENT_TYPES,
+        # Optional region bias etc. can be added here.
     }
-    data = _post("places:searchNearby", body)
-    return data.get("places", []) or []
+    with _client() as c:
+        r = c.post(f"{API_ROOT}/places:searchText", headers=_headers(), json=body)
+    if r.status_code != 200:
+        raise PlacesError(f"searchText failed {r.status_code}: {r.text[:300]}")
+    return r.json().get("places") or []
 
 
-def normalize_place(p: Dict[str, Any]) -> Dict[str, Any]:
-    loc = p.get("location") or {}
-    display_name = (p.get("displayName") or {}).get("text")
-    photos = p.get("photos") or []
-    photo_name = photos[0].get("name") if photos else None
-
-    return {
-        "id": p.get("id"),
-        "place_id": p.get("id"),  # keep a stable key for your UI
-        "name": display_name,
-        "lat": loc.get("latitude"),
-        "lng": loc.get("longitude"),
-        "address": p.get("formattedAddress"),
-        "primaryType": p.get("primaryType"),
-        "types": p.get("types") or [],
-        "rating": p.get("rating"),
-        "user_ratings_total": p.get("userRatingCount"),
-        "url": p.get("googleMapsUri"),
-        # Generate a backend-proxied photo URL (no key in browser)
-        "photoName": photo_name,
-        "image_url": _photo_media_url(photo_name) if photo_name else None,
-    }
-
-
-def details_v1(place_id: str, fields: list[str]):
-    if not PLACES_KEY:
-      raise RuntimeError("Missing GOOGLE_PLACES_KEY")
-    url = f"https://places.googleapis.com/v1/places/{place_id}"
-    headers = {
-      "X-Goog-Api-Key": PLACES_KEY,
-      "X-Goog-FieldMask": ",".join(fields),  # v1 requires a field mask
-    }
-    with httpx.Client(timeout=10.0) as c:
-      r = c.get(url, headers=headers)
-      r.raise_for_status()
-      return r.json()
-
-# mapapp/services/places.py (add this alongside your other helpers)
-def normalize_details_basic(p: dict) -> dict:
-    def lt(x): return (x or {}).get("text")
-
-    photos = p.get("photos") or []
-    photo_name = photos[0].get("name") if photos else None
-    image_url = f"/api/places/photo?name={photo_name}&maxwidth=640&maxheight=400" if photo_name else None
-
-    return {
-        "id":            p.get("id"),
-        "place_id":      p.get("id"),
-        "name":          lt(p.get("displayName")),
-        "address":       p.get("formattedAddress"),
-        "lat":           (p.get("location") or {}).get("latitude"),
-        "lng":           (p.get("location") or {}).get("longitude"),
-        "rating":        p.get("rating"),
-        "user_ratings_total": p.get("userRatingCount"),
-        "url":           p.get("googleMapsUri"),
-        "website":       p.get("websiteUri"),
-        "image_url":     image_url,
-        # ⛔️ no review_summary / review_disclosure / review_link
-    }
-
-
-def search_nearby_v1(
-    center: dict,                 # {"lat": float, "lng": float}
-    radius_m: int = 1500,
-    included_types: list[str] = None,
-    max_results: int = 20,
-):
+def nearby_search_apartments(center: dict, *, radius_m: int, page_size: int = 15) -> list[dict]:
     """
-    POST https://places.googleapis.com/v1/places:searchNearby
-    Only returns requested fields via X-Goog-FieldMask.
+    POST places:searchNearby with includedTypes restricted to apartment flavors.
+    center = {"lat": float, "lng": float}
     """
-    if not PLACES_KEY:
-        raise RuntimeError("Missing GOOGLE_PLACES_KEY")
-
-    url = "https://places.googleapis.com/v1/places:searchNearby"
-    headers = {
-        "X-Goog-Api-Key": PLACES_KEY,
-        "X-Goog-FieldMask": ",".join([
-            # project the fields we need to render
-            "places.id",
-            "places.displayName",
-            "places.formattedAddress",
-            "places.location",
-            "places.types",
-            "places.rating",
-            "places.userRatingCount",
-            "places.photos",
-        ]),
-    }
+    lat = float(center["lat"])
+    lng = float(center["lng"])
     body = {
         "locationRestriction": {
-            "circle": {
-                "center": {"latitude": center["lat"], "longitude": center["lng"]},
-                "radius": radius_m,
-            }
+            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}
         },
-        "maxResultCount": max_results,
+        "includedTypes": ALLOWED_APARTMENT_TYPES,
+        "pageSize": max(1, min(int(page_size or 15), 20)),
+    }
+    with _client() as c:
+        r = c.post(f"{API_ROOT}/places:searchNearby", headers=_headers(), json=body)
+    if r.status_code != 200:
+        raise PlacesError(f"searchNearby failed {r.status_code}: {r.text[:300]}")
+    return r.json().get("places") or []
+
+
+def search_nearby_v1(center: dict, *, radius_m: int, included_types: list[str] | None, max_results: int = 20) -> dict:
+    """
+    General nearby search used by NearbyAround endpoint.
+    Returns the raw API response dict (with 'places': [...]).
+    """
+    lat = float(center["lat"])
+    lng = float(center["lng"])
+    body = {
+        "locationRestriction": {
+            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": int(radius_m)}
+        },
+        "pageSize": max(1, min(int(max_results or 20), 20)),
     }
     if included_types:
         body["includedTypes"] = included_types
+    with _client() as c:
+        r = c.post(f"{API_ROOT}/places:searchNearby", headers=_headers(), json=body)
+    if r.status_code != 200:
+        raise PlacesError(f"searchNearby_v1 failed {r.status_code}: {r.text[:300]}")
+    return r.json()
 
-    with httpx.Client(timeout=10.0) as c:
-        r = c.post(url, headers=headers, json=body)
-        r.raise_for_status()
-        return r.json()
+
+def details_v1(place_id: str, fields: list[str]) -> dict:
+    """
+    GET places/{place_id}?fields=...
+    """
+    headers = _headers().copy()
+    if fields:
+        headers["X-Goog-FieldMask"] = ",".join(fields)
+    with _client() as c:
+        r = c.get(f"{API_ROOT}/places/{place_id}", headers=headers)
+    if r.status_code != 200:
+        raise PlacesError(f"details_v1 failed {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
+# ------------------------- Normalizers -------------------------
+
+def _first_photo_name(p: dict) -> str | None:
+    photos = p.get("photos") or []
+    if not photos:
+        return None
+    name = photos[0].get("name")
+    return name or None
+
+
+def normalize_place(p: dict) -> dict:
+    """
+    Normalize a place result for list cards.
+    """
+    return {
+        "id": p.get("id"),
+        "name": (p.get("displayName") or {}).get("text") if isinstance(p.get("displayName"), dict) else p.get("displayName"),
+        "address": p.get("formattedAddress"),
+        "lat": ((p.get("location") or {}).get("latitude")),
+        "lng": ((p.get("location") or {}).get("longitude")),
+        "googleMapsUri": p.get("googleMapsUri"),
+        "websiteUri": p.get("websiteUri"),
+        "primaryType": p.get("primaryType"),
+        "types": p.get("types") or [],
+        "photoName": _first_photo_name(p),
+        "rating": p.get("rating"),
+        "userRatingCount": p.get("userRatingCount"),
+    }
+
 
 def normalize_v1_place_basic(p: dict) -> dict:
-    """Flatten one v1 'place' object to FE-friendly shape."""
-    def lt(x): return (x or {}).get("text")
-    photos = p.get("photos") or []
-    photo_name = photos[0].get("name") if photos else None
-    image_url = f"/api/places/photo?name={photo_name}&maxwidth=480&maxheight=320" if photo_name else None
-    loc = p.get("location") or {}
+    """
+    Smaller card payload for nearby POIs (not only apartments).
+    """
     return {
-        "id":        p.get("id"),
-        "place_id":  p.get("id"),
-        "name":      lt(p.get("displayName")),
-        "address":   p.get("formattedAddress"),
-        "lat":       loc.get("latitude"),
-        "lng":       loc.get("longitude"),
-        "types":     p.get("types") or [],
-        "rating":    p.get("rating"),
-        "user_ratings_total": p.get("userRatingCount"),
-        "image_url": image_url,
+        "id": p.get("id"),
+        "name": (p.get("displayName") or {}).get("text") if isinstance(p.get("displayName"), dict) else p.get("displayName"),
+        "address": p.get("formattedAddress"),
+        "lat": ((p.get("location") or {}).get("latitude")),
+        "lng": ((p.get("location") or {}).get("longitude")),
+        "googleMapsUri": p.get("googleMapsUri"),
+        "primaryType": p.get("primaryType"),
+        "types": p.get("types") or [],
+        "photoName": _first_photo_name(p),
+    }
+
+
+def normalize_details_basic(p: dict) -> dict:
+    """
+    Detail view payload.
+    """
+    return {
+        "id": p.get("id"),
+        "name": (p.get("displayName") or {}).get("text") if isinstance(p.get("displayName"), dict) else p.get("displayName"),
+        "address": p.get("formattedAddress"),
+        "lat": ((p.get("location") or {}).get("latitude")),
+        "lng": ((p.get("location") or {}).get("longitude")),
+        "googleMapsUri": p.get("googleMapsUri"),
+        "websiteUri": p.get("websiteUri"),
+        "rating": p.get("rating"),
+        "userRatingCount": p.get("userRatingCount"),
+        "photoName": _first_photo_name(p),
+        "photos": [ph.get("name") for ph in (p.get("photos") or []) if isinstance(ph, dict) and ph.get("name")],
+        "types": p.get("types") or [],
+        "primaryType": p.get("primaryType"),
     }
