@@ -62,19 +62,31 @@ ALLOWED_APARTMENT_TYPES = [
 
 def text_search_apartments(*, text_query: str, page_size: int = 15) -> list[dict]:
     """
-    POST places:searchText with includedTypes restricted to apartment flavors.
+    POST places:searchText filtering to apartments. Text Search expects `includedType` (singular).
     """
     body = {
         "textQuery": text_query,
         "pageSize": max(1, min(int(page_size or 15), 20)),
-        "includedTypes": ALLOWED_APARTMENT_TYPES,
-        # Optional region bias etc. can be added here.
+        "includedType": "apartment_complex",  # <-- singular
+        # Optional: "rankPreference": "RELEVANCE",
     }
     with _client() as c:
         r = c.post(f"{API_ROOT}/places:searchText", headers=_headers(), json=body)
+
+        # Fallback: if Google still complains about the filter, retry without it
+        if r.status_code == 400:
+            try:
+                msg = r.json().get("error", {}).get("message", "")
+            except Exception:
+                msg = r.text
+            if "Unknown name" in msg or "Cannot find field" in msg:
+                body.pop("includedType", None)
+                r = c.post(f"{API_ROOT}/places:searchText", headers=_headers(), json=body)
+
     if r.status_code != 200:
         raise PlacesError(f"searchText failed {r.status_code}: {r.text[:300]}")
     return r.json().get("places") or []
+
 
 
 def nearby_search_apartments(center: dict, *, radius_m: int, page_size: int = 15) -> list[dict]:
